@@ -8,12 +8,7 @@ const MealRegistration = require('./models/MealRegistration');
 const User = require('./models/User');
 
 // Kết nối MongoDB
-mongoose.connect(process.env.MONGODB_URI, {
-  useNewUrlParser: true,
-  useUnifiedTopology: true,
-})
-.then(() => console.log('MongoDB connected'))
-.catch((err) => console.error('MongoDB connection error:', err));
+mongoose.connect(process.env.MONGODB_URI);
 
 var express = require('express');
 var path = require('path');
@@ -35,7 +30,7 @@ app.use(cors({
   origin: [
     'http://localhost:3001',
     'http://localhost:3000',
-    'https://eating-management-frontend.vercel.app',
+    'https://eating-management-fe.vercel.app',
     'https://eating-management.vercel.app',
     'https://eating-management-git-main.vercel.app'
   ],
