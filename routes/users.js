@@ -6,6 +6,11 @@ const jwt = require('jsonwebtoken');
 const ActivityLog = require('../models/ActivityLog');
 const { requireAuth, requireRole } = require('../middleware/auth');
 const nodemailer = require('nodemailer');
+const ExcelJS = require('exceljs');
+const PDFDocument = require('pdfkit');
+const { Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell } = require('docx');
+const Meal = require('../models/Meal');
+const MealRegistration = require('../models/MealRegistration');
 
 /* GET users listing. */
 router.get('/', function(req, res, next) {
@@ -20,6 +25,8 @@ async function sendOTPEmail(email, otp) {
       user: process.env.EMAIL_USER,
       pass: process.env.EMAIL_PASS,
     },
+    socketTimeout: 10000,
+    connectionTimeout: 10000,
   });
   const mailOptions = {
     from: process.env.EMAIL_USER,
@@ -27,7 +34,14 @@ async function sendOTPEmail(email, otp) {
     subject: 'Mã xác thực OTP',
     text: `Mã OTP của bạn là: ${otp}. Mã có hiệu lực trong 10 phút.`,
   };
-  await transporter.sendMail(mailOptions);
+  console.log('Chuẩn bị gửi OTP qua email:', email, otp);
+  try {
+    await transporter.sendMail(mailOptions);
+    console.log('Đã gửi OTP qua email:', email);
+  } catch (err) {
+    console.error('Lỗi gửi OTP qua email:', err);
+    throw err;
+  }
 }
 
 // Đăng ký
@@ -47,6 +61,8 @@ router.post('/register', async (req, res) => {
     
     // Gửi OTP qua email
     await sendOTPEmail(email, otp);
+    // Trả response về FE
+    res.status(201).json({ message: 'Đăng ký thành công! Vui lòng nhập OTP gửi về email.' });
   } catch (err) {
     res.status(500).json({ message: 'Lỗi server', error: err.message });
   }
@@ -145,10 +161,39 @@ router.post('/resend-otp', async (req, res) => {
   res.json({ message: 'Đã gửi lại OTP thành công' });
 });
 
-// Xem log hoạt động (admin)
-router.get('/activity-log', requireAuth, requireRole('admin'), async (req, res) => {
+// API lấy log hoạt động, lọc theo userId, tuần, tháng, ngày
+router.get('/activity-log', async (req, res) => {
   try {
-    const logs = await ActivityLog.find().populate('user', 'username fullName email').sort({ createdAt: -1 }).limit(200);
+    const { userId, mode, year, month, week, date } = req.query;
+    let filter = {};
+    if (userId) filter.user = userId;
+    let startDate, endDate;
+    const now = new Date();
+    if (mode === 'month' && month && year) {
+      const m = parseInt(month) - 1;
+      const y = parseInt(year);
+      startDate = new Date(y, m, 1);
+      endDate = new Date(y, m + 1, 0, 23, 59, 59, 999);
+    } else if (mode === 'week' && week && year) {
+      const y = parseInt(year);
+      const w = parseInt(week);
+      const firstDayOfYear = new Date(y, 0, 1);
+      const days = (w - 1) * 7 + (firstDayOfYear.getDay() === 0 ? 1 : 0);
+      startDate = new Date(y, 0, 1 + days);
+      endDate = new Date(startDate);
+      endDate.setDate(startDate.getDate() + 6);
+      endDate.setHours(23, 59, 59, 999);
+    } else if (mode === 'day' && date) {
+      startDate = new Date(date);
+      endDate = new Date(date);
+      endDate.setHours(23, 59, 59, 999);
+    }
+    if (startDate && endDate) {
+      filter.createdAt = { $gte: startDate, $lte: endDate };
+    }
+    // Chỉ lấy log đăng ký ăn/hủy ăn (theo action thực tế trong DB)
+    filter.action = { $in: ['cancel_meal', 'register_meal'] };
+    const logs = await ActivityLog.find(filter).populate('user', 'fullName email username').sort({ createdAt: -1 });
     res.json(logs);
   } catch (err) {
     res.status(500).json({ message: 'Lỗi server', error: err.message });
@@ -183,6 +228,150 @@ router.post('/reset-password', async (req, res) => {
   user.otpExpires = undefined;
   await user.save();
   res.json({ message: 'Đổi mật khẩu thành công' });
+});
+
+// API xuất báo cáo
+router.get('/export-report', async (req, res) => {
+  try {
+    const { type = 'excel', mode = 'month', month, year, week, userId } = req.query;
+    let startDate, endDate;
+    const now = new Date();
+    if (mode === 'month') {
+      const m = month ? parseInt(month) - 1 : now.getMonth();
+      const y = year ? parseInt(year) : now.getFullYear();
+      startDate = new Date(y, m, 1);
+      endDate = new Date(y, m + 1, 0, 23, 59, 59, 999);
+    } else if (mode === 'week') {
+      // Tính tuần theo ISO (thứ 2 đầu tuần)
+      const y = year ? parseInt(year) : now.getFullYear();
+      const w = week ? parseInt(week) : 1;
+      const firstDayOfYear = new Date(y, 0, 1);
+      const days = (w - 1) * 7 + (firstDayOfYear.getDay() === 0 ? 1 : 0);
+      startDate = new Date(y, 0, 1 + days);
+      endDate = new Date(startDate);
+      endDate.setDate(startDate.getDate() + 6);
+      endDate.setHours(23, 59, 59, 999);
+    }
+    // Lấy danh sách user chỉ role 'user'
+    const users = await User.find({ role: 'user' }, 'fullName phone email');
+    // Lấy danh sách đăng ký suất ăn trong khoảng thời gian
+    let filter = { date: { $gte: startDate, $lte: endDate } };
+    if (userId) filter.user = userId;
+    const regs = await MealRegistration.find(filter).populate('user');
+    // Thống kê
+    // Ngày tạo báo cáo
+    const reportDate = new Date();
+    // Tính tổng số ngày từ đầu tháng đến ngày xuất báo cáo
+    let totalDays = 0;
+    if (mode === 'month' || mode === 'personal') {
+      const y = year ? parseInt(year) : now.getFullYear();
+      const m = month ? parseInt(month) - 1 : now.getMonth();
+      const today = now;
+      const firstDay = new Date(y, m, 1);
+      totalDays = Math.floor((today - firstDay) / (1000 * 60 * 60 * 24)) + 1;
+    }
+    const report = users.map(u => {
+      const userRegs = regs.filter(r => r.user && r.user._id.equals(u._id));
+      const canceled = userRegs.filter(r => r.isCancel).length;
+      const eaten = totalDays - canceled;
+      const total = eaten * 30000;
+      return {
+        name: u.fullName,
+        phone: u.phone,
+        email: u.email,
+        eaten,
+        canceled,
+        total
+      };
+    });
+    if (type === 'excel') {
+      // Xuất file Excel
+      const workbook = new ExcelJS.Workbook();
+      const sheet = workbook.addWorksheet('Báo cáo');
+      sheet.columns = [
+        { header: 'Tên', key: 'name', width: 20 },
+        { header: 'Số điện thoại', key: 'phone', width: 15 },
+        { header: 'Email', key: 'email', width: 25 },
+        { header: 'Số suất ăn', key: 'eaten', width: 12 },
+        { header: 'Số suất hủy', key: 'canceled', width: 12 },
+        { header: 'Tổng tiền (VNĐ)', key: 'total', width: 15 },
+      ];
+      sheet.addRows(report);
+      sheet.addRow([]);
+      sheet.addRow(['Ngày tạo báo cáo:', reportDate.toLocaleString('vi-VN')]);
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      res.setHeader('Content-Disposition', 'attachment; filename=baocao.xlsx');
+      await workbook.xlsx.write(res);
+      res.end();
+      return;
+    }
+    if (type === 'pdf') {
+      // Xuất file PDF với font Unicode
+      const doc = new PDFDocument({ margin: 30, size: 'A4' });
+      const fontPath = require('path').join(__dirname, '../public/fonts/DejaVuSans.ttf');
+      doc.registerFont('DejaVu', fontPath);
+      doc.font('DejaVu');
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', 'attachment; filename=baocao.pdf');
+      doc.fontSize(18).text('Báo cáo suất ăn', { align: 'center' });
+      doc.moveDown();
+      doc.fontSize(12);
+      doc.text('Ngày tạo báo cáo: ' + reportDate.toLocaleString('vi-VN'));
+      doc.moveDown();
+      const headers = ['Tên', 'Số điện thoại', 'Email', 'Số suất ăn', 'Số suất hủy', 'Tổng tiền (VNĐ)'];
+      doc.text(headers.join(' | '));
+      doc.moveDown(0.5);
+      report.forEach(r => {
+        doc.text(`${r.name} | ${r.phone} | ${r.email} | ${r.eaten} | ${r.canceled} | ${r.total}`);
+      });
+      doc.end();
+      doc.pipe(res);
+      return;
+    }
+    if (type === 'word') {
+      // Xuất file Word
+      const tableRows = [
+        new TableRow({
+          children: [
+            'Tên', 'Số điện thoại', 'Email', 'Số suất ăn', 'Số suất hủy', 'Tổng tiền (VNĐ)'
+          ].map(h => new TableCell({ children: [new Paragraph(h)] }))
+        }),
+        ...report.map(r => new TableRow({
+          children: [
+            r.name, r.phone, r.email, r.eaten.toString(), r.canceled.toString(), r.total.toString()
+          ].map(val => new TableCell({ children: [new Paragraph(val)] }))
+        })),
+        new TableRow({
+          children: [new TableCell({ children: [new Paragraph('Ngày tạo báo cáo: ' + reportDate.toLocaleString('vi-VN'))], columnSpan: 6 })]
+        })
+      ];
+      const doc = new Document({
+        sections: [{ children: [
+          new Paragraph({ text: 'Báo cáo suất ăn', heading: 'Heading1' }),
+          new Table({ rows: tableRows })
+        ]}]
+      });
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+      res.setHeader('Content-Disposition', 'attachment; filename=baocao.docx');
+      const buffer = await Packer.toBuffer(doc);
+      res.end(buffer);
+      return;
+    }
+    res.status(501).json({ message: 'Chỉ mới hỗ trợ xuất Excel, PDF/Word, PDF và Word đã được bổ sung.' });
+  } catch (err) {
+    console.error('Lỗi xuất báo cáo:', err);
+    res.status(500).json({ message: 'Lỗi server', error: err.message });
+  }
+});
+
+// API trả về user role 'user'
+router.get('/only-users', async (req, res) => {
+  try {
+    const users = await User.find({ role: 'user' }, 'fullName email username _id');
+    res.json(users);
+  } catch (err) {
+    res.status(500).json({ message: 'Lỗi server', error: err.message });
+  }
 });
 
 module.exports = router;
