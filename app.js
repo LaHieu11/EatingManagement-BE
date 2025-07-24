@@ -31,7 +31,16 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
 app.use(cookieParser());
 app.use(express.static(path.join(__dirname, 'public')));
-app.use(cors());
+app.use(cors({
+  origin: [
+    'http://localhost:3001',
+    'http://localhost:3000',
+    'https://eating-management-frontend.vercel.app',
+    'https://eating-management.vercel.app',
+    'https://eating-management-git-main.vercel.app'
+  ],
+  credentials: true
+}));
 
 app.use('/', indexRouter);
 app.use('/users', usersRouter);
@@ -61,20 +70,40 @@ async function sendMealNotification(user, meal) {
   }
 }
 
-// Cron job: mỗi phút kiểm tra các bữa ăn sắp diễn ra sau 30 phút
-nodeCron.schedule('* * * * *', async () => {
-  const now = new Date();
-  const thirtyMinLater = new Date(now.getTime() + 30 * 60 * 1000);
-  // Tìm các bữa ăn diễn ra sau 30 phút (chỉ gửi thông báo 1 lần)
-  const meals = await Meal.find({
-    date: { $gte: thirtyMinLater, $lt: new Date(thirtyMinLater.getTime() + 60 * 1000) },
-  });
-  for (const meal of meals) {
-    const regs = await MealRegistration.find({ meal: meal._id }).populate('user');
-    for (const reg of regs) {
-      // Có thể thêm trường đã gửi thông báo để tránh gửi lặp lại
-      await sendMealNotification(reg.user, meal);
+// Cron job: mỗi 5 phút kiểm tra các bữa ăn sắp diễn ra sau 30 phút
+nodeCron.schedule('*/5 * * * *', async () => {
+  try {
+    // Kiểm tra kết nối MongoDB trước khi thực hiện
+    if (mongoose.connection.readyState !== 1) {
+      console.log('MongoDB chưa sẵn sàng, bỏ qua cron job');
+      return;
     }
+
+    const now = new Date();
+    const thirtyMinLater = new Date(now.getTime() + 30 * 60 * 1000);
+    
+    // Tìm các bữa ăn diễn ra sau 30 phút (chỉ gửi thông báo 1 lần)
+    const meals = await Meal.find({
+      date: { $gte: thirtyMinLater, $lt: new Date(thirtyMinLater.getTime() + 60 * 1000) },
+    }).maxTimeMS(5000); // Timeout 5 giây
+
+    if (meals.length > 0) {
+      console.log(`Tìm thấy ${meals.length} bữa ăn cần gửi thông báo`);
+    }
+
+    for (const meal of meals) {
+      try {
+        const regs = await MealRegistration.find({ meal: meal._id }).populate('user').maxTimeMS(5000);
+        for (const reg of regs) {
+          // Có thể thêm trường đã gửi thông báo để tránh gửi lặp lại
+          await sendMealNotification(reg.user, meal);
+        }
+      } catch (mealErr) {
+        console.error('Lỗi xử lý bữa ăn:', mealErr);
+      }
+    }
+  } catch (err) {
+    console.error('Lỗi cron job:', err);
   }
 });
 

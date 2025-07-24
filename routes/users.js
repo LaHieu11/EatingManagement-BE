@@ -5,6 +5,7 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const ActivityLog = require('../models/ActivityLog');
 const { requireAuth, requireRole } = require('../middleware/auth');
+const { sendOTP } = require('../config/twilio');
 
 /* GET users listing. */
 router.get('/', function(req, res, next) {
@@ -25,9 +26,20 @@ router.post('/register', async (req, res) => {
     const otpExpires = new Date(Date.now() + 10 * 60 * 1000); // 10 phút
     const user = new User({ username, password: hashedPassword, fullName, email, phone, gender, otp, otpExpires });
     await user.save();
-    // Demo: log OTP ra console thay vì gửi SMS
-    console.log(`OTP cho ${phone}: ${otp}`);
-    res.status(201).json({ message: 'Đăng ký thành công. Vui lòng xác thực OTP gửi về số điện thoại.', phone });
+    
+    // Gửi OTP qua SMS
+    const smsResult = await sendOTP(phone, otp);
+    if (smsResult.success) {
+      res.status(201).json({ message: 'Đăng ký thành công. Vui lòng xác thực OTP gửi về số điện thoại.', phone });
+    } else {
+      // Nếu gửi SMS thất bại, vẫn log OTP để test
+      console.log(`OTP cho ${phone}: ${otp} (SMS gửi thất bại: ${smsResult.error})`);
+      res.status(201).json({ 
+        message: 'Đăng ký thành công. Vui lòng xác thực OTP gửi về số điện thoại.', 
+        phone,
+        debug: `SMS gửi thất bại, OTP: ${otp}` 
+      });
+    }
   } catch (err) {
     res.status(500).json({ message: 'Lỗi server', error: err.message });
   }
@@ -108,6 +120,43 @@ router.put('/change-password', requireAuth, async (req, res) => {
     user.password = await bcrypt.hash(newPassword, 10);
     await user.save();
     res.json({ message: 'Đổi mật khẩu thành công' });
+  } catch (err) {
+    res.status(500).json({ message: 'Lỗi server', error: err.message });
+  }
+});
+
+// Gửi lại OTP
+router.post('/resend-otp', async (req, res) => {
+  try {
+    const { phone } = req.body;
+    const user = await User.findOne({ phone });
+    if (!user) return res.status(404).json({ message: 'Không tìm thấy user' });
+    if (user.isPhoneVerified) return res.status(400).json({ message: 'Số điện thoại đã xác thực' });
+    
+    // Kiểm tra thời gian gửi lại OTP (tối thiểu 1 phút)
+    if (user.otpExpires && user.otpExpires > new Date(Date.now() - 9 * 60 * 1000)) {
+      return res.status(400).json({ message: 'Vui lòng đợi ít nhất 1 phút trước khi gửi lại OTP' });
+    }
+    
+    // Sinh OTP mới
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const otpExpires = new Date(Date.now() + 10 * 60 * 1000); // 10 phút
+    
+    user.otp = otp;
+    user.otpExpires = otpExpires;
+    await user.save();
+    
+    // Gửi OTP qua SMS
+    const smsResult = await sendOTP(phone, otp);
+    if (smsResult.success) {
+      res.json({ message: 'Đã gửi lại OTP thành công' });
+    } else {
+      console.log(`Resend OTP cho ${phone}: ${otp} (SMS gửi thất bại: ${smsResult.error})`);
+      res.json({ 
+        message: 'Đã gửi lại OTP thành công',
+        debug: `SMS gửi thất bại, OTP: ${otp}` 
+      });
+    }
   } catch (err) {
     res.status(500).json({ message: 'Lỗi server', error: err.message });
   }
