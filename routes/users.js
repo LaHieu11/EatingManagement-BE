@@ -99,7 +99,17 @@ router.post('/login', async (req, res) => {
       process.env.JWT_SECRET || 'secret',
       { expiresIn: '1d' }
     );
-    res.json({ token, user: { username: user.username, fullName: user.fullName, email: user.email, role: user.role, gender: user.gender } });
+    res.json({
+      token,
+      user: {
+        _id: user._id,
+        username: user.username,
+        fullName: user.fullName,
+        email: user.email,
+        role: user.role,
+        gender: user.gender
+      }
+    });
   } catch (err) {
     res.status(500).json({ message: 'Lỗi server', error: err.message });
   }
@@ -164,12 +174,16 @@ router.post('/resend-otp', async (req, res) => {
 // API lấy log hoạt động, lọc theo userId, tuần, tháng, ngày
 router.get('/activity-log', async (req, res) => {
   try {
-    const { userId, mode, year, month, week, date } = req.query;
+    const { userId, mode, year, month, week, date, from, to } = req.query;
     let filter = {};
     if (userId) filter.user = userId;
     let startDate, endDate;
     const now = new Date();
-    if (mode === 'month' && month && year) {
+    if (from && to) {
+      startDate = new Date(from);
+      endDate = new Date(to);
+      endDate.setHours(23, 59, 59, 999);
+    } else if (mode === 'month' && month && year) {
       const m = parseInt(month) - 1;
       const y = parseInt(year);
       startDate = new Date(y, m, 1);

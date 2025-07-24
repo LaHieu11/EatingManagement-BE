@@ -35,7 +35,6 @@ router.post('/create', requireAuth, requireRole('admin'), async (req, res) => {
 router.post('/cancel', requireAuth, async (req, res) => {
   try {
     const { date, type } = req.body;
-    console.log('API /meals/cancel nhận:', { date, type });
     if (!date || !type) return res.status(400).json({ message: 'Thiếu thông tin ngày hoặc loại bữa' });
     // Kiểm tra giờ chốt
     const now = new Date();
@@ -53,11 +52,9 @@ router.post('/cancel', requireAuth, async (req, res) => {
         $lt: new Date(mealTime.getFullYear(), mealTime.getMonth(), mealTime.getDate() + 1,0,0)
       }
     });
-    console.log('Checking existing registration:', { userId: req.user.userId, type, mealTime, existing });
     if (existing) return res.status(400).json({ message: 'Bạn đã đăng ký hủy ăn cho bữa này' });
     const reg = new MealRegistration({ user: req.user.userId, date: mealTime, type, isCancel: true });
     await reg.save();
-    console.log('Created new registration:', reg);
     await ActivityLog.create({ user: req.user.userId, action: 'cancel_meal', detail: `Đăng ký hủy ăn ${type} ${mealTime.toISOString().slice(0,10)}` });
     res.status(201).json(reg);
   } catch (err) {
@@ -136,7 +133,6 @@ router.get('/list', requireAuth, async (req, res) => {
   try {
     const result = [];
     const now = new Date();
-    console.log('Creating virtual meals for 7ays from:', now);
     for (let i = 0; i < 7; i++) {
       const day = new Date(now.getFullYear(), now.getMonth(), now.getDate() + i);
       // Bữa trưa: 11h30 (giờ Việt Nam)
@@ -152,9 +148,7 @@ router.get('/list', requireAuth, async (req, res) => {
         _id: `${day.getFullYear()}-${String(day.getMonth()+1).padStart(2,'0')}-${String(day.getDate()).padStart(2,'0')}-dinner`,
       };
       result.push(lunchMeal, dinnerMeal);
-      console.log('Created meals for day:', day.toLocaleString('vi-VN'), { lunchMeal, dinnerMeal });
     }
-    console.log('Total virtual meals created:', result.length);
     res.json(result);
   } catch (err) {
     res.status(500).json({ message: 'Lỗi server', error: err.message });
@@ -165,7 +159,6 @@ router.get('/list', requireAuth, async (req, res) => {
 router.get('/my-registrations', requireAuth, async (req, res) => {
   try {
     const regs = await MealRegistration.find({ user: req.user.userId });
-    console.log('User registrations loaded:', { userId: req.user.userId, count: regs.length, registrations: regs });
     res.json(regs);
   } catch (err) {
     res.status(500).json({ message: 'Lỗi server', error: err.message });
@@ -229,15 +222,6 @@ router.get('/kitchen/summary', requireAuth, requireRole(['kitchen', 'admin']), a
       type,
       isCancel: true
     }).populate('user', 'username fullName email');
-    console.log('DEBUG kitchen/summary:', {
-      start, end, type,
-      cancels: cancels.map(c => ({
-        user: c.user,
-        date: c.date,
-        type: c.type,
-        isCancel: c.isCancel
-      }))
-    });
     // Lấy tất cả user
     const allUsers = await User.find({ role: 'user' }, 'username fullName email');
     // Người ăn = allUsers - cancels
@@ -251,7 +235,6 @@ router.get('/kitchen/summary', requireAuth, requireRole(['kitchen', 'admin']), a
       cancels: cancels.map(r => r.user),
     });
   } catch (err) {
-    console.error('Error in kitchen/summary:', err);
     res.status(500).json({ message: 'Lỗi server', error: err.message });
   }
 });
