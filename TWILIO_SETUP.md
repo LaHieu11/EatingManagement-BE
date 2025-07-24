@@ -5,6 +5,8 @@
 2. Đăng ký tài khoản miễn phí
 3. Xác thực email và số điện thoại
 
+9X1WNQVAWQ9UBGTK4F6S62LY
+
 ## Bước 2: Lấy thông tin cấu hình
 1. Đăng nhập vào Twilio Console
 2. Tìm Account SID và Auth Token trong Dashboard

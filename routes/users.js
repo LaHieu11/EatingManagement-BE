@@ -5,12 +5,30 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const ActivityLog = require('../models/ActivityLog');
 const { requireAuth, requireRole } = require('../middleware/auth');
-const { sendOTP } = require('../config/twilio');
+const nodemailer = require('nodemailer');
 
 /* GET users listing. */
 router.get('/', function(req, res, next) {
   res.send('respond with a resource');
 });
+
+// Hàm gửi OTP qua email
+async function sendOTPEmail(email, otp) {
+  const transporter = nodemailer.createTransport({
+    service: 'gmail',
+    auth: {
+      user: process.env.EMAIL_USER,
+      pass: process.env.EMAIL_PASS,
+    },
+  });
+  const mailOptions = {
+    from: process.env.EMAIL_USER,
+    to: email,
+    subject: 'Mã xác thực OTP',
+    text: `Mã OTP của bạn là: ${otp}. Mã có hiệu lực trong 10 phút.`,
+  };
+  await transporter.sendMail(mailOptions);
+}
 
 // Đăng ký
 router.post('/register', async (req, res) => {
@@ -27,19 +45,8 @@ router.post('/register', async (req, res) => {
     const user = new User({ username, password: hashedPassword, fullName, email, phone, gender, otp, otpExpires });
     await user.save();
     
-    // Gửi OTP qua SMS
-    const smsResult = await sendOTP(phone, otp);
-    if (smsResult.success) {
-      res.status(201).json({ message: 'Đăng ký thành công. Vui lòng xác thực OTP gửi về số điện thoại.', phone });
-    } else {
-      // Nếu gửi SMS thất bại, vẫn log OTP để test
-      console.log(`OTP cho ${phone}: ${otp} (SMS gửi thất bại: ${smsResult.error})`);
-      res.status(201).json({ 
-        message: 'Đăng ký thành công. Vui lòng xác thực OTP gửi về số điện thoại.', 
-        phone,
-        debug: `SMS gửi thất bại, OTP: ${otp}` 
-      });
-    }
+    // Gửi OTP qua email
+    await sendOTPEmail(email, otp);
   } catch (err) {
     res.status(500).json({ message: 'Lỗi server', error: err.message });
   }
@@ -47,22 +54,16 @@ router.post('/register', async (req, res) => {
 
 // Xác thực OTP
 router.post('/verify-otp', async (req, res) => {
-  try {
-    const { phone, otp } = req.body;
-    const user = await User.findOne({ phone });
-    if (!user) return res.status(404).json({ message: 'Không tìm thấy user' });
-    if (user.isPhoneVerified) return res.status(400).json({ message: 'Số điện thoại đã xác thực' });
-    if (!user.otp || !user.otpExpires || user.otp !== otp || user.otpExpires < new Date()) {
-      return res.status(400).json({ message: 'OTP không đúng hoặc đã hết hạn' });
-    }
-    user.isPhoneVerified = true;
-    user.otp = undefined;
-    user.otpExpires = undefined;
-    await user.save();
-    res.json({ message: 'Xác thực OTP thành công, tài khoản đã được kích hoạt' });
-  } catch (err) {
-    res.status(500).json({ message: 'Lỗi server', error: err.message });
+  const { email, otp } = req.body;
+  const user = await User.findOne({ email });
+  if (!user || !user.otp || !user.otpExpires || user.otp !== otp || user.otpExpires < new Date()) {
+    return res.status(400).json({ message: 'OTP không đúng hoặc đã hết hạn' });
   }
+  user.otp = undefined;
+  user.otpExpires = undefined;
+  user.isActive = true;
+  await user.save();
+  res.json({ message: 'Xác thực OTP thành công, tài khoản đã được kích hoạt' });
 });
 
 // Đăng nhập
@@ -127,39 +128,21 @@ router.put('/change-password', requireAuth, async (req, res) => {
 
 // Gửi lại OTP
 router.post('/resend-otp', async (req, res) => {
-  try {
-    const { phone } = req.body;
-    const user = await User.findOne({ phone });
-    if (!user) return res.status(404).json({ message: 'Không tìm thấy user' });
-    if (user.isPhoneVerified) return res.status(400).json({ message: 'Số điện thoại đã xác thực' });
-    
-    // Kiểm tra thời gian gửi lại OTP (tối thiểu 1 phút)
-    if (user.otpExpires && user.otpExpires > new Date(Date.now() - 9 * 60 * 1000)) {
-      return res.status(400).json({ message: 'Vui lòng đợi ít nhất 1 phút trước khi gửi lại OTP' });
-    }
-    
-    // Sinh OTP mới
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    const otpExpires = new Date(Date.now() + 10 * 60 * 1000); // 10 phút
-    
-    user.otp = otp;
-    user.otpExpires = otpExpires;
-    await user.save();
-    
-    // Gửi OTP qua SMS
-    const smsResult = await sendOTP(phone, otp);
-    if (smsResult.success) {
-      res.json({ message: 'Đã gửi lại OTP thành công' });
-    } else {
-      console.log(`Resend OTP cho ${phone}: ${otp} (SMS gửi thất bại: ${smsResult.error})`);
-      res.json({ 
-        message: 'Đã gửi lại OTP thành công',
-        debug: `SMS gửi thất bại, OTP: ${otp}` 
-      });
-    }
-  } catch (err) {
-    res.status(500).json({ message: 'Lỗi server', error: err.message });
+  const { email } = req.body;
+  const user = await User.findOne({ email });
+  if (!user) return res.status(404).json({ message: 'Không tìm thấy người dùng với email này' });
+  // Kiểm tra thời gian gửi lại OTP (tối thiểu 1 phút)
+  if (user.otpExpires && user.otpExpires > new Date(Date.now() - 9 * 60 * 1000)) {
+    return res.status(400).json({ message: 'Vui lòng đợi ít nhất 1 phút trước khi gửi lại OTP' });
   }
+  // Sinh OTP mới
+  const otp = Math.floor(100000 + Math.random() * 900000).toString();
+  const otpExpires = new Date(Date.now() + 10 * 60 * 1000); // 10 phút
+  user.otp = otp;
+  user.otpExpires = otpExpires;
+  await user.save();
+  await sendOTPEmail(user.email, otp);
+  res.json({ message: 'Đã gửi lại OTP thành công' });
 });
 
 // Xem log hoạt động (admin)
@@ -170,6 +153,36 @@ router.get('/activity-log', requireAuth, requireRole('admin'), async (req, res) 
   } catch (err) {
     res.status(500).json({ message: 'Lỗi server', error: err.message });
   }
+});
+
+// Quên mật khẩu - Gửi OTP về email
+router.post('/forgot-password', async (req, res) => {
+  const { email } = req.body;
+  const user = await User.findOne({ email });
+  if (!user) return res.status(404).json({ message: 'Không tìm thấy người dùng với email này' });
+  const otp = Math.floor(100000 + Math.random() * 900000).toString();
+  const otpExpires = new Date(Date.now() + 10 * 60 * 1000); // 10 phút
+  user.otp = otp;
+  user.otpExpires = otpExpires;
+  await user.save();
+  await sendOTPEmail(email, otp);
+  res.json({ message: 'Đã gửi OTP về email' });
+});
+
+// Quên mật khẩu - Xác thực OTP và đổi mật khẩu
+router.post('/reset-password', async (req, res) => {
+  const { email, otp, newPassword } = req.body;
+  const user = await User.findOne({ email });
+  if (!user || !user.otp || !user.otpExpires || user.otp !== otp || user.otpExpires < new Date()) {
+    return res.status(400).json({ message: 'OTP không đúng hoặc đã hết hạn' });
+  }
+  const bcrypt = require('bcryptjs');
+  const hashedPassword = await bcrypt.hash(newPassword, 10);
+  user.password = hashedPassword;
+  user.otp = undefined;
+  user.otpExpires = undefined;
+  await user.save();
+  res.json({ message: 'Đổi mật khẩu thành công' });
 });
 
 module.exports = router;
