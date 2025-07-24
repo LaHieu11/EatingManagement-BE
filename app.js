@@ -34,8 +34,11 @@ app.use(cors({
     'https://eating-management.vercel.app',
     'https://eating-management-git-main.vercel.app'
   ],
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true
 }));
+app.options('*', cors());
 
 app.use('/', indexRouter);
 app.use('/users', usersRouter);
