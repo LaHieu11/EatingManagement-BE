@@ -206,7 +206,7 @@ router.get('/activity-log', async (req, res) => {
       filter.createdAt = { $gte: startDate, $lte: endDate };
     }
     // Chỉ lấy log đăng ký ăn/hủy ăn (theo action thực tế trong DB)
-    filter.action = { $in: ['cancel_meal', 'register_meal'] };
+    filter.action = { $in: ['cancel_meal', 'register_meal', 'uncancel_meal'] };
     const logs = await ActivityLog.find(filter).populate('user', 'fullName email username').sort({ createdAt: -1 });
     res.json(logs);
   } catch (err) {
@@ -245,7 +245,7 @@ router.post('/reset-password', async (req, res) => {
 });
 
 // API xuất báo cáo
-router.get('/export-report', async (req, res) => {
+router.get('/export-report', requireAuth, async (req, res) => {
   try {
     const { type = 'excel', mode = 'month', month, year, week, userId } = req.query;
     let startDate, endDate;
@@ -270,25 +270,48 @@ router.get('/export-report', async (req, res) => {
     const users = await User.find({ role: 'user' }, 'fullName phone email');
     // Lấy danh sách đăng ký suất ăn trong khoảng thời gian
     let filter = { date: { $gte: startDate, $lte: endDate } };
-    if (userId) filter.user = userId;
+    if (userId) {
+      filter.user = userId;
+      // Nếu là personal report, chỉ lấy user đó
+      const personalUser = await User.findById(userId);
+      if (personalUser) {
+        users = [personalUser];
+      }
+    }
     const regs = await MealRegistration.find(filter).populate('user');
+    
+    console.log('Export report params:', { mode, month, year, week, userId, startDate, endDate });
+    console.log('Total registrations found:', regs.length);
+    console.log('Total users to report:', users.length);
+    
     // Thống kê
     // Ngày tạo báo cáo
     const reportDate = new Date();
-    // Tính tổng số ngày từ đầu tháng đến ngày xuất báo cáo
-    let totalDays = 0;
-    if (mode === 'month' || mode === 'personal') {
+    
+    // Tính tổng số bữa ăn có thể có trong khoảng thời gian
+    let totalMeals = 0;
+    if (mode === 'month') {
       const y = year ? parseInt(year) : now.getFullYear();
       const m = month ? parseInt(month) - 1 : now.getMonth();
-      const today = now;
-      const firstDay = new Date(y, m, 1);
-      totalDays = Math.floor((today - firstDay) / (1000 * 60 * 60 * 24)) + 1;
+      const daysInMonth = new Date(y, m + 1, 0).getDate();
+      totalMeals = daysInMonth * 2; // 2 bữa/ngày (trưa + tối)
+    } else if (mode === 'week') {
+      totalMeals = 7 * 2; // 7 ngày * 2 bữa/ngày
+    } else if (mode === 'personal') {
+      const y = year ? parseInt(year) : now.getFullYear();
+      const m = month ? parseInt(month) - 1 : now.getMonth();
+      const daysInMonth = new Date(y, m + 1, 0).getDate();
+      totalMeals = daysInMonth * 2; // 2 bữa/ngày
     }
+    
     const report = users.map(u => {
       const userRegs = regs.filter(r => r.user && r.user._id.equals(u._id));
       const canceled = userRegs.filter(r => r.isCancel).length;
-      const eaten = totalDays - canceled;
+      const eaten = totalMeals - canceled;
       const total = eaten * 30000;
+      
+      console.log(`User ${u.fullName}: totalMeals=${totalMeals}, canceled=${canceled}, eaten=${eaten}, total=${total}`);
+      
       return {
         name: u.fullName,
         phone: u.phone,
@@ -316,6 +339,20 @@ router.get('/export-report', async (req, res) => {
       res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
       res.setHeader('Content-Disposition', 'attachment; filename=baocao.xlsx');
       await workbook.xlsx.write(res);
+      
+      // Log hoạt động xuất báo cáo
+      if (req.user?.userId) {
+        console.log('Creating export log for user:', req.user.userId);
+        await ActivityLog.create({ 
+          user: req.user.userId, 
+          action: 'export_report', 
+          detail: `Xuất báo cáo ${mode} định dạng Excel - ${reportDate.toLocaleString('vi-VN')}` 
+        });
+        console.log('Export log created successfully');
+      } else {
+        console.log('No user ID found, skipping export log');
+      }
+      
       res.end();
       return;
     }
@@ -340,6 +377,20 @@ router.get('/export-report', async (req, res) => {
       });
       doc.end();
       doc.pipe(res);
+      
+      // Log hoạt động xuất báo cáo
+      if (req.user?.userId) {
+        console.log('Creating export log for user:', req.user.userId);
+        await ActivityLog.create({ 
+          user: req.user.userId, 
+          action: 'export_report', 
+          detail: `Xuất báo cáo ${mode} định dạng PDF - ${reportDate.toLocaleString('vi-VN')}` 
+        });
+        console.log('Export log created successfully');
+      } else {
+        console.log('No user ID found, skipping export log');
+      }
+      
       return;
     }
     if (type === 'word') {
@@ -369,6 +420,20 @@ router.get('/export-report', async (req, res) => {
       res.setHeader('Content-Disposition', 'attachment; filename=baocao.docx');
       const buffer = await Packer.toBuffer(doc);
       res.end(buffer);
+      
+      // Log hoạt động xuất báo cáo
+      if (req.user?.userId) {
+        console.log('Creating export log for user:', req.user.userId);
+        await ActivityLog.create({ 
+          user: req.user.userId, 
+          action: 'export_report', 
+          detail: `Xuất báo cáo ${mode} định dạng Word - ${reportDate.toLocaleString('vi-VN')}` 
+        });
+        console.log('Export log created successfully');
+      } else {
+        console.log('No user ID found, skipping export log');
+      }
+      
       return;
     }
     res.status(501).json({ message: 'Chỉ mới hỗ trợ xuất Excel, PDF/Word, PDF và Word đã được bổ sung.' });
@@ -383,6 +448,126 @@ router.get('/only-users', async (req, res) => {
   try {
     const users = await User.find({ role: 'user' }, 'fullName email username _id');
     res.json(users);
+  } catch (err) {
+    res.status(500).json({ message: 'Lỗi server', error: err.message });
+  }
+});
+
+// API lấy danh sách tất cả người dùng (admin)
+router.get('/all', requireAuth, requireRole('admin'), async (req, res) => {
+  try {
+    const users = await User.find({}, 'fullName email username role gender phone isActive createdAt');
+    res.json(users);
+  } catch (err) {
+    res.status(500).json({ message: 'Lỗi server', error: err.message });
+  }
+});
+
+// API thêm người dùng mới (admin)
+router.post('/create', requireAuth, requireRole('admin'), async (req, res) => {
+  try {
+    const { username, fullName, email, password, role, gender, phone } = req.body;
+    
+    // Kiểm tra username đã tồn tại
+    const existingUser = await User.findOne({ username });
+    if (existingUser) {
+      return res.status(400).json({ message: 'Username đã tồn tại' });
+    }
+    
+    // Kiểm tra email đã tồn tại
+    const existingEmail = await User.findOne({ email });
+    if (existingEmail) {
+      return res.status(400).json({ message: 'Email đã tồn tại' });
+    }
+    
+    const bcrypt = require('bcryptjs');
+    const hashedPassword = await bcrypt.hash(password, 10);
+    
+    const user = new User({
+      username,
+      fullName,
+      email,
+      password: hashedPassword,
+      role: role || 'user',
+      gender,
+      phone,
+      isActive: true
+    });
+    
+    await user.save();
+    res.status(201).json({ message: 'Tạo người dùng thành công', user: { _id: user._id, username, fullName, email, role } });
+  } catch (err) {
+    res.status(500).json({ message: 'Lỗi server', error: err.message });
+  }
+});
+
+// API khóa/mở khóa tài khoản (admin)
+router.put('/toggle-status/:userId', requireAuth, requireRole('admin'), async (req, res) => {
+  try {
+    const user = await User.findById(req.params.userId);
+    if (!user) {
+      return res.status(404).json({ message: 'Không tìm thấy người dùng' });
+    }
+    
+    user.isActive = !user.isActive;
+    await user.save();
+    
+    res.json({ 
+      message: user.isActive ? 'Đã mở khóa tài khoản' : 'Đã khóa tài khoản',
+      isActive: user.isActive 
+    });
+  } catch (err) {
+    res.status(500).json({ message: 'Lỗi server', error: err.message });
+  }
+});
+
+// API đổi mật khẩu người dùng (admin)
+router.put('/change-password/:userId', requireAuth, requireRole('admin'), async (req, res) => {
+  try {
+    const { newPassword } = req.body;
+    const user = await User.findById(req.params.userId);
+    if (!user) {
+      return res.status(404).json({ message: 'Không tìm thấy người dùng' });
+    }
+    
+    const bcrypt = require('bcryptjs');
+    const hashedPassword = await bcrypt.hash(newPassword, 10);
+    user.password = hashedPassword;
+    await user.save();
+    
+    res.json({ message: 'Đổi mật khẩu thành công' });
+  } catch (err) {
+    res.status(500).json({ message: 'Lỗi server', error: err.message });
+  }
+});
+
+// API xóa người dùng (admin)
+router.delete('/:userId', requireAuth, requireRole('admin'), async (req, res) => {
+  try {
+    const user = await User.findById(req.params.userId);
+    if (!user) {
+      return res.status(404).json({ message: 'Không tìm thấy người dùng' });
+    }
+    
+    // Không cho phép xóa admin
+    if (user.role === 'admin') {
+      return res.status(403).json({ message: 'Không thể xóa tài khoản admin' });
+    }
+    
+    await user.deleteOne();
+    res.json({ message: 'Đã xóa người dùng' });
+  } catch (err) {
+    res.status(500).json({ message: 'Lỗi server', error: err.message });
+  }
+});
+
+// API lịch sử xuất báo cáo (admin)
+router.get('/export-history', requireAuth, requireRole('admin'), async (req, res) => {
+  try {
+    const history = await ActivityLog.find({ 
+      action: 'export_report' 
+    }).populate('user', 'fullName username').sort({ createdAt: -1 });
+    res.json(history);
   } catch (err) {
     res.status(500).json({ message: 'Lỗi server', error: err.message });
   }
