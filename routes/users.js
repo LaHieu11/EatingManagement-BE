@@ -304,10 +304,13 @@ router.get('/export-report', requireAuth, async (req, res) => {
       totalMeals = daysInMonth * 2; // 2 bữa/ngày
     }
     
+    // Tính report
+    const guestRegs = regs.filter(r => r.isGuest);
     const report = users.map(u => {
       const userRegs = regs.filter(r => r.user && r.user._id.equals(u._id));
       const canceled = userRegs.filter(r => r.isCancel).length;
-      const eaten = totalMeals - canceled;
+      const guestTotal = guestRegs.filter(g => g.user && g.user._id.equals(u._id)).reduce((sum, g) => sum + (g.guestCount || 0), 0);
+      const eaten = totalMeals - canceled + guestTotal;
       const total = eaten * 30000;
       
       console.log(`User ${u.fullName}: totalMeals=${totalMeals}, canceled=${canceled}, eaten=${eaten}, total=${total}`);
@@ -318,6 +321,7 @@ router.get('/export-report', requireAuth, async (req, res) => {
         email: u.email,
         eaten,
         canceled,
+        guestTotal,
         total
       };
     });
@@ -331,6 +335,7 @@ router.get('/export-report', requireAuth, async (req, res) => {
         { header: 'Email', key: 'email', width: 25 },
         { header: 'Số suất ăn', key: 'eaten', width: 12 },
         { header: 'Số suất hủy', key: 'canceled', width: 12 },
+        { header: 'Số suất khách', key: 'guestTotal', width: 15 },
         { header: 'Tổng tiền (VNĐ)', key: 'total', width: 15 },
       ];
       sheet.addRows(report);
@@ -369,11 +374,11 @@ router.get('/export-report', requireAuth, async (req, res) => {
       doc.fontSize(12);
       doc.text('Ngày tạo báo cáo: ' + reportDate.toLocaleString('vi-VN'));
       doc.moveDown();
-      const headers = ['Tên', 'Số điện thoại', 'Email', 'Số suất ăn', 'Số suất hủy', 'Tổng tiền (VNĐ)'];
+      const headers = ['Tên', 'Số điện thoại', 'Email', 'Số suất ăn', 'Số suất hủy', 'Số suất khách', 'Tổng tiền (VNĐ)'];
       doc.text(headers.join(' | '));
       doc.moveDown(0.5);
       report.forEach(r => {
-        doc.text(`${r.name} | ${r.phone} | ${r.email} | ${r.eaten} | ${r.canceled} | ${r.total}`);
+        doc.text(`${r.name} | ${r.phone} | ${r.email} | ${r.eaten} | ${r.canceled} | ${r.guestTotal} | ${r.total}`);
       });
       doc.end();
       doc.pipe(res);
@@ -397,18 +402,19 @@ router.get('/export-report', requireAuth, async (req, res) => {
       // Xuất file Word
       const tableRows = [
         new TableRow({
-          children: [
-            'Tên', 'Số điện thoại', 'Email', 'Số suất ăn', 'Số suất hủy', 'Tổng tiền (VNĐ)'
-          ].map(h => new TableCell({ children: [new Paragraph(h)] }))
+          children: headers.map(h => new TableCell({ children: [new Paragraph(h)] }))
         }),
         ...report.map(r => new TableRow({
           children: [
-            r.name, r.phone, r.email, r.eaten.toString(), r.canceled.toString(), r.total.toString()
-          ].map(val => new TableCell({ children: [new Paragraph(val)] }))
-        })),
-        new TableRow({
-          children: [new TableCell({ children: [new Paragraph('Ngày tạo báo cáo: ' + reportDate.toLocaleString('vi-VN'))], columnSpan: 6 })]
-        })
+            new TableCell({ children: [new Paragraph(r.name)] }),
+            new TableCell({ children: [new Paragraph(r.phone)] }),
+            new TableCell({ children: [new Paragraph(r.email)] }),
+            new TableCell({ children: [new Paragraph(r.eaten.toString())] }),
+            new TableCell({ children: [new Paragraph(r.canceled.toString())] }),
+            new TableCell({ children: [new Paragraph(r.guestTotal.toString())] }),
+            new TableCell({ children: [new Paragraph(r.total.toString())] }),
+          ]
+        }))
       ];
       const doc = new Document({
         sections: [{ children: [

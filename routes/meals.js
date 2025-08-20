@@ -25,6 +25,7 @@ router.post('/create', requireAuth, requireRole('admin'), async (req, res) => {
     const { date, type } = req.body;
     const meal = new Meal({ date, type });
     await meal.save();
+    await ActivityLog.create({ user: req.user.userId, action: 'create_meal', detail: `Tạo bữa ăn mới: ${type} ngày ${new Date(date).toISOString().slice(0,10)}` });
     res.status(201).json(meal);
   } catch (err) {
     res.status(500).json({ message: 'Lỗi server', error: err.message });
@@ -36,22 +37,19 @@ router.post('/cancel', requireAuth, async (req, res) => {
   try {
     const { date, type } = req.body;
     if (!date || !type) return res.status(400).json({ message: 'Thiếu thông tin ngày hoặc loại bữa' });
-    // Kiểm tra giờ chốt
-    const now = new Date();
-    const mealTime = new Date(date);
-    const cutoff = type === 'lunch'
-      ? new Date(mealTime.getFullYear(), mealTime.getMonth(), mealTime.getDate(), 8, 30)
-      : new Date(mealTime.getFullYear(), mealTime.getMonth(), mealTime.getDate(), 14, 30);
-    if (now > cutoff) return res.status(400).json({ message: 'Đã quá giờ đăng ký hủy ăn' });
+    const mealTime = new Date(date); // date đã là UTC ISO string
+    // Tìm trong khoảng 00:00 - 23:59:59.999 UTC của ngày đó
+    const start = new Date(Date.UTC(mealTime.getUTCFullYear(), mealTime.getUTCMonth(), mealTime.getUTCDate(), 0, 0, 0, 0));
+    const end = new Date(Date.UTC(mealTime.getUTCFullYear(), mealTime.getUTCMonth(), mealTime.getUTCDate(), 23, 59, 59, 999));
+    console.log('[DEBUG] Đăng ký hủy ăn:', { user: req.user.userId, type, mealTime, start, end });
     // Kiểm tra đã đăng ký hủy chưa
     const existing = await MealRegistration.findOne({
       user: req.user.userId,
       type,
-      date: {
-        $gte: new Date(mealTime.getFullYear(), mealTime.getMonth(), mealTime.getDate(), 0,0, 0, 0),
-        $lt: new Date(mealTime.getFullYear(), mealTime.getMonth(), mealTime.getDate() + 1,0,0)
-      }
+      date: { $gte: start, $lte: end },
+      isCancel: true
     });
+    console.log('[DEBUG] Existing cancel:', existing);
     if (existing) return res.status(400).json({ message: 'Bạn đã đăng ký hủy ăn cho bữa này' });
     const reg = new MealRegistration({ user: req.user.userId, date: mealTime, type, isCancel: true });
     await reg.save();
@@ -103,6 +101,8 @@ router.get('/report/:year/:month', requireAuth, async (req, res) => {
     const allUsers = await User.find({ role: 'user' }, 'username fullName email');
     // Lấy tất cả đăng ký hủy trong tháng
     const cancels = await MealRegistration.find({ date: { $gte: start, $lt: end }, isCancel: true });
+    // Lấy tất cả đăng ký suất ăn ngoài hệ thống trong tháng
+    const guestRegs = await MealRegistration.find({ date: { $gte: start, $lt: end }, isGuest: true });
     // Sinh ra tất cả các bữa ăn trong tháng
     const daysInMonth = new Date(year, month, 0).getDate();
     let allMeals = [];
@@ -120,7 +120,10 @@ router.get('/report/:year/:month', requireAuth, async (req, res) => {
         const hasCancel = cancels.some(c => c.user.toString() === u._id.toString() && c.type === meal.type && c.date.getTime() === meal.date.getTime());
         if (!hasCancel) count++;
       }
-      return { user: u, count };
+      // Tổng số suất khách user này đã đăng ký trong tháng
+      const guestTotal = guestRegs.filter(g => g.user.toString() === u._id.toString()).reduce((sum, g) => sum + (g.guestCount || 0), 0);
+      // Cộng số công khách vào tổng công
+      return { user: u, count: count + guestTotal, guestTotal };
     });
     res.json(report);
   } catch (err) {
@@ -160,6 +163,38 @@ router.get('/my-registrations', requireAuth, async (req, res) => {
   try {
     const regs = await MealRegistration.find({ user: req.user.userId });
     res.json(regs);
+  } catch (err) {
+    res.status(500).json({ message: 'Lỗi server', error: err.message });
+  }
+});
+
+// Đăng ký thêm suất ăn cho người ngoài hệ thống (user)
+router.post('/register-guest', requireAuth, async (req, res) => {
+  try {
+    const { date, type, guestName, guestCount, guestReason } = req.body;
+    if (!date || !type || !guestName || !guestCount) {
+      return res.status(400).json({ message: 'Thiếu thông tin đăng ký suất ăn ngoài hệ thống' });
+    }
+    const mealTime = new Date(date);
+    // Lưu bản ghi suất ăn ngoài hệ thống
+    const reg = new MealRegistration({
+      user: req.user.userId,
+      date: mealTime,
+      type,
+      isCancel: false,
+      guestName,
+      guestCount,
+      guestReason,
+      guestBy: req.user.userId,
+      isGuest: true
+    });
+    await reg.save();
+    await ActivityLog.create({
+      user: req.user.userId,
+      action: 'register_guest_meal',
+      detail: `Đăng ký thêm ${guestCount} suất ăn cho khách (${guestName}) vào bữa ${type} ngày ${mealTime.toISOString().slice(0,10)}${guestReason ? ' - Lý do: ' + guestReason : ''}`
+    });
+    res.status(201).json(reg);
   } catch (err) {
     res.status(500).json({ message: 'Lỗi server', error: err.message });
   }
@@ -213,26 +248,30 @@ router.get('/kitchen/summary', requireAuth, requireRole(['kitchen', 'admin']), a
     const { date, type } = req.query;
     if (!date || !type) return res.status(400).json({ message: 'Thiếu thông tin ngày hoặc loại bữa' });
     const mealDate = new Date(date);
-    if (isNaN(mealDate.getTime())) return res.status(400).json({ message: 'Định dạng ngày không hợp lệ' });
-    // Xác định ngày bắt đầu và kết thúc (UTC)
     const start = new Date(Date.UTC(mealDate.getUTCFullYear(), mealDate.getUTCMonth(), mealDate.getUTCDate(), 0, 0, 0, 0));
-    const end = new Date(Date.UTC(mealDate.getUTCFullYear(), mealDate.getUTCMonth(), mealDate.getUTCDate() + 1, 0, 0, 0, 0));
-    const cancels = await MealRegistration.find({
-      date: { $gte: start, $lt: end },
-      type,
-      isCancel: true
-    }).populate('user', 'username fullName email');
-    // Lấy tất cả user
+    const end = new Date(Date.UTC(mealDate.getUTCFullYear(), mealDate.getUTCMonth(), mealDate.getUTCDate(), 23, 59, 59, 999));
+    console.log('[DEBUG] kitchen/summary', { type, start, end });
+    const cancels = await MealRegistration.find({ date: { $gte: start, $lte: end }, type, isCancel: true }).populate('user', 'username fullName email');
+    const guestRegs = await MealRegistration.find({ date: { $gte: start, $lte: end }, type, isGuest: true }).populate('user', 'username fullName email guestBy');
+    console.log('[DEBUG] Cancels:', cancels);
+    console.log('[DEBUG] GuestRegs:', guestRegs);
     const allUsers = await User.find({ role: 'user' }, 'username fullName email');
-    // Người ăn = allUsers - cancels
     const cancelUserIds = new Set(cancels.map(r => r.user._id.toString()));
     const eaters = allUsers.filter(u => !cancelUserIds.has(u._id.toString()));
+    const totalGuest = guestRegs.reduce((sum, g) => sum + (g.guestCount || 0), 0);
     res.json({
       meal: { date: mealDate, type },
-      totalEat: eaters.length,
+      totalEat: eaters.length + totalGuest,
       totalCancel: cancels.length,
       eaters,
       cancels: cancels.map(r => r.user),
+      guestRegs: guestRegs.map(g => ({
+        guestName: g.guestName,
+        guestCount: g.guestCount,
+        guestReason: g.guestReason,
+        guestBy: g.user,
+      })),
+      totalGuest
     });
   } catch (err) {
     res.status(500).json({ message: 'Lỗi server', error: err.message });
